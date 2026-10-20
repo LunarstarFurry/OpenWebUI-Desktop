@@ -119,11 +119,15 @@ jobs:
             - name: Package for Windows
               id: win_build
               if: runner.os == 'Windows'
+              shell: bash
               continue-on-error: true
+              env:
+                  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
               run: npx electron-builder --win --${{ matrix.arch }} --publish never
 
             - name: Package for Windows (unsigned fallback)
               if: runner.os == 'Windows' && steps.win_build.outcome == 'failure'
+              shell: bash
               env:
                   WIN_CSC_LINK: ''
                   CSC_IDENTITY_AUTO_DISCOVERY: 'false'
