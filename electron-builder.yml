@@ -84,5 +84,5 @@ flatpak:
 npmRebuild: false
 publish:
   provider: github
-  owner: open-webui
-  repo: desktop
+  owner: LunarstarFurry
+  repo: OpenWebUI-Desktop
