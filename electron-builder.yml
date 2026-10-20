@@ -81,7 +81,7 @@ flatpak:
     - --filesystem=home
     - --talk-name=org.freedesktop.Notifications
     - --talk-name=org.freedesktop.portal.Desktop
-npmRebuild: true
+npmRebuild: false
 publish:
   provider: github
   owner: open-webui
