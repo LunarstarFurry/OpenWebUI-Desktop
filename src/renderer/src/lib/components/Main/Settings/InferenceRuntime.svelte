@@ -77,7 +77,11 @@
     settingUp = true
     setupStatus = ''
     try {
-      await window.electronAPI.setupLlamaCpp()
+      if (lsInfo?.binaryPath) {
+        await window.electronAPI.updateLlamaCpp()
+      } else {
+        await window.electronAPI.setupLlamaCpp()
+      }
       lsInfo = await window.electronAPI.getLlamaCppInfo()
     } catch (e) {
       console.error('Failed to setup llama-server:', e)

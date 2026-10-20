@@ -61,9 +61,19 @@ export const getLlamaCppInfo = () => {
     const cacheBase = path.join(getInstallDir(), 'llama.cpp')
     const relative = path.relative(cacheBase, binaryPath)
     const tag = relative.split(path.sep)[0]
-    if (tag) version = tag
+    if (tag) {
+      version = tag
+      const variantFile = path.join(cacheBase, tag, '.variant')
+      if (fs.existsSync(variantFile)) {
+        try { installedVariant = fs.readFileSync(variantFile, 'utf8').trim() } catch {}
+      } else if (process.platform === 'win32') {
+        const tagDir = path.join(cacheBase, tag)
+        if (fs.existsSync(path.join(tagDir, 'cudart64_13.dll'))) installedVariant = 'cuda-13.4'
+        else if (fs.existsSync(path.join(tagDir, 'cudart64_12.dll'))) installedVariant = 'cuda-12.4'
+      }
+    }
   }
-  return { url, status, pid, binaryPath, version }
+  return { url, status, pid, binaryPath, version, installedVariant }
 }
 
 export const getLlamaCppPty = (): pty.IPty | null => ptyProcess
@@ -275,33 +285,48 @@ export const setupLlamaCpp = async (
     fs.mkdirSync(cacheBase, { recursive: true })
   }
 
+  const isMatchingVariant = (dir: string): boolean => {
+    const variantFile = path.join(dir, '.variant')
+    if (fs.existsSync(variantFile)) {
+      try {
+        const v = fs.readFileSync(variantFile, 'utf8').trim()
+        if (v && v !== variant) return false
+      } catch {}
+    } else if (process.platform === 'win32') {
+      if (variant.startsWith('cuda-13') && fs.existsSync(path.join(dir, 'cudart64_12.dll'))) return false
+      if (variant.startsWith('cuda-12') && fs.existsSync(path.join(dir, 'cudart64_13.dll'))) return false
+    }
+    return true
+  }
+
   // ── Check for existing cached binary before any network request ──
   // This allows llama.cpp to start offline when previously installed.
   if (version !== 'latest') {
     // Pinned version — check its specific directory
     const pinnedDir = path.join(cacheBase, version)
-    const pinnedBinary = fs.existsSync(pinnedDir) ? findBinary(pinnedDir) : null
+    const pinnedBinary = fs.existsSync(pinnedDir) && isMatchingVariant(pinnedDir) ? findBinary(pinnedDir) : null
     if (pinnedBinary) {
-      log.info(`Using cached llama-server binary (pinned ${version}): ${pinnedBinary}`)
+      log.info(`Using cached llama-server binary (pinned ${version}, ${variant}): ${pinnedBinary}`)
       binaryPath = pinnedBinary
       onStatus?.('Ready')
       return pinnedBinary
     }
   } else {
-    // 'latest' — scan all cached version directories for a usable binary
+    // 'latest' — scan all cached version directories for a usable matching binary
     try {
       const cachedVersions = fs.readdirSync(cacheBase, { withFileTypes: true })
         .filter((d) => d.isDirectory())
         .map((d) => d.name)
 
       for (const cachedTag of cachedVersions) {
-        const cachedBinary = findBinary(path.join(cacheBase, cachedTag))
-        if (cachedBinary) {
-          log.info(`Found cached llama-server binary (${cachedTag}): ${cachedBinary}`)
-          // Still try to fetch release info to see if there's a newer version,
-          // but if the network is unavailable, use the cached binary.
-          binaryPath = cachedBinary
-          break
+        const tagDir = path.join(cacheBase, cachedTag)
+        if (isMatchingVariant(tagDir)) {
+          const cachedBinary = findBinary(tagDir)
+          if (cachedBinary) {
+            log.info(`Found cached llama-server binary (${cachedTag}, ${variant}): ${cachedBinary}`)
+            binaryPath = cachedBinary
+            break
+          }
         }
       }
     } catch {
@@ -331,10 +356,22 @@ export const setupLlamaCpp = async (
   }
 
   const existingBinary = findBinary(versionDir)
-  if (existingBinary) {
-    log.info(`llama-server binary already exists: ${existingBinary}`)
+  if (existingBinary && isMatchingVariant(versionDir)) {
+    log.info(`llama-server binary already exists (${variant}): ${existingBinary}`)
     binaryPath = existingBinary
     return existingBinary
+  }
+
+  if (existingBinary && !isMatchingVariant(versionDir)) {
+    log.info(`Variant mismatch detected in ${versionDir} (expected ${variant}). Cleaning for re-download...`)
+    onStatus?.(`Switching variant to ${variant}…`)
+    await stopLlamaCpp()
+    try {
+      fs.rmSync(versionDir, { recursive: true, force: true })
+      fs.mkdirSync(versionDir, { recursive: true })
+    } catch (e) {
+      log.error('Failed to clean old variant directory:', e)
+    }
   }
 
   const { pattern, isZip } = getAssetPattern(tag, variant)
@@ -406,6 +443,10 @@ export const setupLlamaCpp = async (
       } catch {}
     }
   }
+
+  try {
+    fs.writeFileSync(path.join(versionDir, '.variant'), variant, 'utf8')
+  } catch {}
 
   const resultBinary = findBinary(versionDir)
   if (!resultBinary) {
