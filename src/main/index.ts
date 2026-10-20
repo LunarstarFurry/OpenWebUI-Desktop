@@ -223,7 +223,13 @@ function tryRegisterShortcut(
   }
 }
 
-const registerShortcuts = (globalAccel?: string, spotlightAccel?: string, voiceInputAccel?: string, callAccel?: string): void => {
+const registerShortcuts = (
+  globalAccel?: string,
+  spotlightAccel?: string,
+  voiceInputAccel?: string,
+  callAccel?: string,
+  silent = true
+): void => {
   globalShortcut.unregisterAll()
 
   // On Wayland / Flatpak global shortcuts are unsupported — skip silently.
@@ -255,14 +261,14 @@ const registerShortcuts = (globalAccel?: string, spotlightAccel?: string, voiceI
         ? (clipboard.readText()?.trim() || '')
         : ''
       toggleSpotlight(text)
-    })
+    }, silent)
   }
 
   // Voice input shortcut – toggle microphone recording
   if (voiceInputAccel && CONFIG?.voiceInputEnabled !== false) {
     tryRegisterShortcut(voiceInputAccel, 'Voice Input', () => {
       toggleVoiceInput()
-    })
+    }, silent)
   } else {
     log.info(`Voice input shortcut skipped — accel="${voiceInputAccel}", enabled=${CONFIG?.voiceInputEnabled}`)
   }
@@ -271,7 +277,7 @@ const registerShortcuts = (globalAccel?: string, spotlightAccel?: string, voiceI
   if (callAccel && CONFIG?.callEnabled !== false) {
     tryRegisterShortcut(callAccel, 'Call', () => {
       toggleCall()
-    })
+    }, silent)
   } else {
     log.info(`Call shortcut skipped — accel="${callAccel}", enabled=${CONFIG?.callEnabled}`)
   }
@@ -1439,7 +1445,7 @@ if (!gotTheLock) {
       CONFIG = await getConfig()
       updateTray()
       voiceInputRecording = false
-      registerShortcuts(CONFIG.globalShortcut, CONFIG.spotlightShortcut, CONFIG.voiceInputShortcut, CONFIG.callShortcut)
+      registerShortcuts(CONFIG.globalShortcut, CONFIG.spotlightShortcut, CONFIG.voiceInputShortcut, CONFIG.callShortcut, false)
     })
 
     // Python/uv
