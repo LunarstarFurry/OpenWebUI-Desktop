@@ -205,8 +205,9 @@ jobs:
         name: Create GitHub Release
         needs: package
         if: >-
-            github.event_name == 'push' &&
-            github.ref == 'refs/heads/release' &&
+            (github.event_name == 'workflow_dispatch' ||
+             startsWith(github.ref, 'refs/tags/v') ||
+             github.ref == 'refs/heads/release') &&
             !cancelled() &&
             needs.package.result != 'failure'
         runs-on: ubuntu-latest
