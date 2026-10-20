@@ -1028,10 +1028,14 @@ const connectPtyPort = (pid?: number): void => {
     // Renderer → port1 → PTY (interactive input)
     port1.on('message', (event) => {
       const msg = event.data
-      if (msg.type === 'input') {
-        ptyProcess.write(msg.data)
-      } else if (msg.type === 'resize') {
-        ptyProcess.resize(msg.cols, msg.rows)
+      try {
+        if (msg.type === 'input') {
+          ptyProcess.write(msg.data)
+        } else if (msg.type === 'resize') {
+          ptyProcess.resize(msg.cols, msg.rows)
+        }
+      } catch (err) {
+        log.warn('PTY message error (process might have exited):', err)
       }
     })
     port1.start()
@@ -1277,6 +1281,10 @@ if (!gotTheLock) {
       newSession.setPermissionRequestHandler((_webContents, permission, callback) => {
         const allowed = ['media', 'mediaKeySystem', 'notifications', 'clipboard-read', 'clipboard-sanitized-write']
         callback(allowed.includes(permission))
+      })
+      newSession.setPermissionCheckHandler((_webContents, permission) => {
+        const allowed = ['media', 'mediaKeySystem', 'notifications', 'clipboard-read', 'clipboard-sanitized-write']
+        return allowed.includes(permission)
       })
     })
 

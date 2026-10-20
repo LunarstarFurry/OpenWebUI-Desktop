@@ -367,10 +367,8 @@
         const connId = data.data.connectionId ?? ''
         const incomingUrl = data.data.url
 
-        if (!openConnections.has(connId)) {
-          openConnections.set(connId, incomingUrl)
-          openConnections = new Map(openConnections)
-        }
+        openConnections.set(connId, incomingUrl)
+        openConnections = new Map(openConnections)
 
         if (view !== 'connected') {
           connectedUrl = openConnections.get(connId) ?? incomingUrl

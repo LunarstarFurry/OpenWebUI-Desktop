@@ -94,18 +94,14 @@ const detectBestVariant = (): string => {
     })
     // NVIDIA GPU detected
     if (platform === 'win32') return 'cuda-12.4'
-    // Linux: no CUDA asset currently available, fall through to other checks
+    if (platform === 'linux') return 'cuda-12.8'
   } catch {
     // nvidia-smi not available or no NVIDIA GPU
   }
 
   // Check for Vulkan support
   try {
-    if (platform === 'win32') {
-      execFileSync('vulkaninfo', ['--summary'], { timeout: 5000, stdio: 'pipe' })
-    } else {
-      execFileSync('vulkaninfo', ['--summary'], { timeout: 5000, stdio: 'pipe' })
-    }
+    execFileSync('vulkaninfo', ['--summary'], { timeout: 5000, stdio: 'pipe' })
     return 'vulkan'
   } catch {
     // Vulkan not available
@@ -153,7 +149,9 @@ const getAssetPattern = (tag: string, variant: string): { pattern: string; isZip
     const variantMap: Record<string, string> = {
       cpu: `llama-${tag}-bin-ubuntu-x64.tar.gz`,
       vulkan: `llama-${tag}-bin-ubuntu-vulkan-x64.tar.gz`,
-      rocm: `llama-${tag}-bin-ubuntu-rocm-7.2-x64.tar.gz`
+      'cuda-12.8': `llama-${tag}-bin-ubuntu-cuda-12.8-x64.tar.gz`,
+      'cuda-13.4': `llama-${tag}-bin-ubuntu-cuda-13.4-x64.tar.gz`,
+      rocm: `llama-${tag}-bin-ubuntu-rocm-10.0-x64.tar.gz`
     }
     const name = variantMap[variant] ?? variantMap.cpu
     return { pattern: name, isZip: false }
@@ -165,6 +163,8 @@ const getAssetPattern = (tag: string, variant: string): { pattern: string; isZip
       cpu: `llama-${tag}-bin-win-cpu-${archStr}.zip`,
       'cuda-12.4': `llama-${tag}-bin-win-cuda-12.4-x64.zip`,
       'cuda-13.1': `llama-${tag}-bin-win-cuda-13.1-x64.zip`,
+      'cuda-13.3': `llama-${tag}-bin-win-cuda-13.3-x64.zip`,
+      'cuda-13.4': `llama-${tag}-bin-win-cuda-13.4-x64.zip`,
       vulkan: `llama-${tag}-bin-win-vulkan-x64.zip`
     }
     const name = variantMap[variant] ?? variantMap.cpu
@@ -172,6 +172,61 @@ const getAssetPattern = (tag: string, variant: string): { pattern: string; isZip
   }
 
   return { pattern: `llama-${tag}-bin-ubuntu-x64.tar.gz`, isZip: false }
+}
+
+const getCudartPattern = (variant: string): string | null => {
+  if (process.platform !== 'win32') return null
+  if (variant === 'cuda-12.4') return 'cudart-llama-bin-win-cuda-12.4-x64.zip'
+  if (variant === 'cuda-13.1') return 'cudart-llama-bin-win-cuda-13.1-x64.zip'
+  if (variant === 'cuda-13.3') return 'cudart-llama-bin-win-cuda-13.3-x64.zip'
+  if (variant === 'cuda-13.4') return 'cudart-llama-bin-win-cuda-13.4-x64.zip'
+  return null
+}
+
+const FALLBACK_LLAMA_TAG = 'b11750'
+
+const fetchLlamaReleaseData = async (version: string): Promise<any> => {
+  const headers = {
+    Accept: 'application/vnd.github.v3+json',
+    'User-Agent': 'OpenWebUI-Desktop'
+  }
+
+  try {
+    if (version && version !== 'latest') {
+      const response = await fetch(`https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${version}`, {
+        headers,
+        signal: AbortSignal.timeout(10000)
+      })
+      if (response.ok) return await response.json()
+    } else {
+      const response = await fetch('https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10', {
+        headers,
+        signal: AbortSignal.timeout(10000)
+      })
+      if (response.ok) {
+        const releases = await response.json()
+        const buildRelease = releases.find((r: any) => r.tag_name?.startsWith('b') && Array.isArray(r.assets) && r.assets.length > 5)
+        if (buildRelease) return buildRelease
+      }
+      const latestResp = await fetch('https://api.github.com/repos/ggml-org/llama.cpp/releases/latest', {
+        headers,
+        signal: AbortSignal.timeout(8000)
+      })
+      if (latestResp.ok) {
+        const data = await latestResp.json()
+        if (Array.isArray(data.assets) && data.assets.length > 5) return data
+      }
+    }
+  } catch (err) {
+    log.warn('[llama.cpp] GitHub API request failed:', err)
+  }
+
+  const tag = (version && version !== 'latest') ? version : FALLBACK_LLAMA_TAG
+  log.info(`[llama.cpp] Using fallback tag: ${tag}`)
+  return {
+    tag_name: tag,
+    assets: []
+  }
 }
 
 /**
@@ -255,36 +310,19 @@ export const setupLlamaCpp = async (
   }
 
   onStatus?.('Fetching release info…')
-  const apiUrl =
-    version === 'latest'
-      ? 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest'
-      : `https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${version}`
-
   let releaseData: any
   try {
-    const response = await fetch(apiUrl, {
-      headers: { Accept: 'application/vnd.github.v3+json' },
-      signal: AbortSignal.timeout(10000)
-    })
-    if (!response.ok) {
-      throw new Error(`GitHub API returned ${response.status}: ${response.statusText}`)
-    }
-    releaseData = await response.json()
+    releaseData = await fetchLlamaReleaseData(version)
   } catch (error) {
-    // Network unavailable — fall back to cached binary if we found one
     if (binaryPath) {
       log.info('Network unavailable, using cached llama-server binary:', binaryPath)
       onStatus?.('Ready (offline)')
       return binaryPath
     }
-    throw new Error(
-      `Failed to fetch release info (no internet?) and no cached llama.cpp binary found. ` +
-      `Please connect to the internet for the initial llama.cpp installation. ` +
-      `Original error: ${error?.message ?? error}`
-    )
+    releaseData = { tag_name: FALLBACK_LLAMA_TAG, assets: [] }
   }
 
-  const tag = releaseData.tag_name
+  const tag = releaseData.tag_name || FALLBACK_LLAMA_TAG
   log.info(`llama.cpp release tag: ${tag}`)
 
   const versionDir = path.join(cacheBase, tag)
@@ -300,20 +338,15 @@ export const setupLlamaCpp = async (
   }
 
   const { pattern, isZip } = getAssetPattern(tag, variant)
-  const asset = (releaseData.assets as ReleaseAsset[]).find((a) => a.name === pattern)
-  if (!asset) {
-    const available = (releaseData.assets as ReleaseAsset[]).map((a) => a.name).join(', ')
-    throw new Error(
-      `No matching asset found for pattern "${pattern}". Available: ${available}`
-    )
-  }
+  const asset = (releaseData.assets as ReleaseAsset[])?.find((a) => a.name === pattern)
+  const downloadUrl = asset?.browser_download_url || `https://github.com/ggml-org/llama.cpp/releases/download/${tag}/${pattern}`
 
-  log.info(`Downloading asset: ${asset.name}`)
-  onStatus?.(`Downloading ${asset.name}…`)
+  log.info(`Downloading asset: ${pattern} from ${downloadUrl}`)
+  onStatus?.(`Downloading ${pattern}…`)
 
-  const downloadPath = path.join(versionDir, asset.name)
+  const downloadPath = path.join(versionDir, pattern)
   if (!fs.existsSync(downloadPath)) {
-    await downloadFileWithProgress(asset.browser_download_url, downloadPath, (progress) => {
+    await downloadFileWithProgress(downloadUrl, downloadPath, (progress) => {
       onStatus?.(`Downloading… ${progress.toFixed(0)}%`)
     })
   }
@@ -342,6 +375,29 @@ export const setupLlamaCpp = async (
     fs.unlinkSync(downloadPath)
   } catch {}
 
+  // If Windows CUDA variant, also download & extract matching cudart runtime DLLs
+  const cudartName = getCudartPattern(variant)
+  if (cudartName) {
+    const cudartAsset = (releaseData.assets as ReleaseAsset[])?.find((a) => a.name === cudartName)
+    const cudartUrl = cudartAsset?.browser_download_url || `https://github.com/ggml-org/llama.cpp/releases/download/${tag}/${cudartName}`
+    const cudartPath = path.join(versionDir, cudartName)
+    try {
+      log.info(`Downloading CUDA runtime: ${cudartName}`)
+      onStatus?.(`Downloading CUDA runtime…`)
+      await downloadFileWithProgress(cudartUrl, cudartPath, (p) => {
+        onStatus?.(`Downloading CUDA runtime… ${p.toFixed(0)}%`)
+      })
+      onStatus?.('Extracting CUDA runtime…')
+      execFileSync('powershell', [
+        '-Command',
+        `Expand-Archive -Path "${cudartPath}" -DestinationPath "${versionDir}" -Force`
+      ])
+      try { fs.unlinkSync(cudartPath) } catch {}
+    } catch (cErr) {
+      log.warn(`Optional CUDA runtime download/extraction failed:`, cErr)
+    }
+  }
+
   if (process.platform !== 'win32') {
     const binary = findBinary(versionDir)
     if (binary) {
@@ -366,16 +422,7 @@ export const checkLlamaCppUpdate = async (): Promise<{ currentVersion: string | 
   const currentInfo = getLlamaCppInfo()
 
   try {
-    const response = await fetch('https://api.github.com/repos/ggml-org/llama.cpp/releases/latest', {
-      headers: { Accept: 'application/vnd.github.v3+json' },
-      signal: AbortSignal.timeout(5000)
-    })
-    
-    if (!response.ok) {
-      throw new Error(`GitHub API returned ${response.status}: ${response.statusText}`)
-    }
-    
-    const releaseData = await response.json()
+    const releaseData = await fetchLlamaReleaseData('latest')
     const latestVersion = releaseData.tag_name
     const currentVersion = currentInfo.version
     
@@ -401,23 +448,11 @@ export const checkLlamaCppUpdate = async (): Promise<{ currentVersion: string | 
 export const updateLlamaCpp = async (
   onStatus?: (status: string) => void
 ): Promise<{ url?: string; status?: string; pid?: number; binaryPath?: string; version?: string | null }> => {
-  // 1. Verify network is available BEFORE destructive operations —
-  //    don't delete the old binary if we can't download a replacement.
   onStatus?.('Checking for updates…')
   let releaseTag: string
   try {
-    const response = await fetch(
-      'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest',
-      {
-        headers: { Accept: 'application/vnd.github.v3+json' },
-        signal: AbortSignal.timeout(10000)
-      }
-    )
-    if (!response.ok) {
-      throw new Error(`GitHub API returned ${response.status}: ${response.statusText}`)
-    }
-    const data = await response.json()
-    releaseTag = data.tag_name
+    const releaseData = await fetchLlamaReleaseData('latest')
+    releaseTag = releaseData.tag_name
   } catch (error) {
     throw new Error(
       `Cannot update llama.cpp: unable to reach GitHub. ` +
@@ -425,10 +460,8 @@ export const updateLlamaCpp = async (
     )
   }
 
-  // 2. Stop if running
   await stopLlamaCpp()
   
-  // 3. Clear old cache directory (safe — we verified network above)
   const currentInfo = getLlamaCppInfo()
   if (currentInfo.version) {
     const cacheDir = path.join(getInstallDir(), 'llama.cpp', currentInfo.version)
@@ -442,11 +475,8 @@ export const updateLlamaCpp = async (
     }
   }
   
-  // 4. Temporarily enforce 'latest' in config so it fetches the newest
   const config = await getConfig()
   await setConfig({ llamaCpp: { ...config.llamaCpp, version: 'latest' } })
-  
-  // 5. Download new release
   onStatus?.('Downloading update…')
   await setupLlamaCpp(onStatus)
   
