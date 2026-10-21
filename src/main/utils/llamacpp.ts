@@ -28,6 +28,11 @@ let status: string | null = null // null | setting-up | starting | started | sto
 let logBuffer: string[] = []
 
 const lock = new ServiceLock('llamacpp')
+
+let statusEmitter: ((type: string, data?: any) => void) | null = null
+export const setLlamaCppStatusEmitter = (emitter: (type: string, data?: any) => void) => {
+  statusEmitter = emitter
+}
 let binaryPath: string | null = null
 
 // ─── Public Getters ─────────────────────────────────────
@@ -272,6 +277,138 @@ const findBinary = (dir: string): string | null => {
 
 // ─── Setup (Download & Extract) ─────────────────────────
 
+
+let isCheckingUpdate = false
+
+export const downloadAndExtractLlamaVersion = async (
+  tag: string,
+  variant: string,
+  onProgress?: (text: string, progress?: number, downloaded?: number, total?: number) => void
+): Promise<string> => {
+  const cacheBase = path.join(getInstallDir(), 'llama.cpp')
+  const versionDir = path.join(cacheBase, tag)
+  if (!fs.existsSync(versionDir)) {
+    fs.mkdirSync(versionDir, { recursive: true })
+  }
+
+  const releaseData = await fetchLlamaReleaseData(tag)
+  const { pattern, isZip } = getAssetPattern(tag, variant)
+  const asset = (releaseData.assets as ReleaseAsset[])?.find((a) => a.name === pattern)
+  const downloadUrl = asset?.browser_download_url || `https://github.com/ggml-org/llama.cpp/releases/download/${tag}/${pattern}`
+
+  const downloadPath = path.join(versionDir, pattern)
+  onProgress?.(`Downloading ${pattern}…`, 0)
+
+  await downloadFileWithProgress(downloadUrl, downloadPath, (progress, downloaded, total) => {
+    onProgress?.(`Downloading engine (${(downloaded / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MB)…`, progress, downloaded, total)
+  })
+
+  onProgress?.('Extracting engine…', 100)
+  if (isZip) {
+    if (process.platform === 'win32') {
+      execFileSync('tar', ['-xf', downloadPath, '-C', versionDir])
+    } else {
+      execFileSync('unzip', ['-o', downloadPath, '-d', versionDir])
+    }
+  } else {
+    await tar.x({ cwd: versionDir, file: downloadPath })
+  }
+  try { fs.unlinkSync(downloadPath) } catch {}
+
+  const cudartName = getCudartPattern(variant)
+  if (cudartName) {
+    const cudartAsset = (releaseData.assets as ReleaseAsset[])?.find((a) => a.name === cudartName)
+    const cudartUrl = cudartAsset?.browser_download_url || `https://github.com/ggml-org/llama.cpp/releases/download/${tag}/${cudartName}`
+    const cudartPath = path.join(versionDir, cudartName)
+    onProgress?.(`Downloading CUDA runtime…`, 0)
+
+    await downloadFileWithProgress(cudartUrl, cudartPath, (p, downloaded, total) => {
+      onProgress?.(`Downloading CUDA runtime (${(downloaded / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MB)…`, p, downloaded, total)
+    })
+
+    onProgress?.('Extracting CUDA runtime…', 100)
+    execFileSync('tar', ['-xf', cudartPath, '-C', versionDir])
+    try { fs.unlinkSync(cudartPath) } catch {}
+  }
+
+  try {
+    fs.writeFileSync(path.join(versionDir, '.variant'), variant, 'utf8')
+  } catch {}
+
+  const binary = findBinary(versionDir)
+  if (!binary) {
+    throw new Error(`llama-server binary not found in ${versionDir}`)
+  }
+  return binary
+}
+
+const triggerBackgroundUpdateCheck = (currentTag: string, variant: string) => {
+  if (isCheckingUpdate) return
+  isCheckingUpdate = true
+
+  setTimeout(async () => {
+    try {
+      const releaseData = await fetchLlamaReleaseData('latest')
+      const latestTag = releaseData.tag_name
+      if (!latestTag || latestTag === currentTag) {
+        isCheckingUpdate = false
+        return
+      }
+
+      const cacheBase = path.join(getInstallDir(), 'llama.cpp')
+      const targetDir = path.join(cacheBase, latestTag)
+      const isMatchingVariant = (dir: string): boolean => {
+        const variantFile = path.join(dir, '.variant')
+        if (fs.existsSync(variantFile)) {
+          try {
+            const v = fs.readFileSync(variantFile, 'utf8').trim()
+            if (v && v !== variant) return false
+          } catch {}
+        } else if (process.platform === 'win32') {
+          if (variant.startsWith('cuda-13') && fs.existsSync(path.join(dir, 'cudart64_12.dll'))) return false
+          if (variant.startsWith('cuda-12') && fs.existsSync(path.join(dir, 'cudart64_13.dll'))) return false
+        }
+        return true
+      }
+
+      if (fs.existsSync(targetDir) && findBinary(targetDir) && isMatchingVariant(targetDir)) {
+        log.info(`Newer llama.cpp version ${latestTag} already downloaded on disk.`)
+        statusEmitter?.('llamacpp:update-ready', { currentVersion: currentTag, newVersion: latestTag })
+        isCheckingUpdate = false
+        return
+      }
+
+      log.info(`Newer llama.cpp version available (${latestTag} > ${currentTag}). Downloading in background...`)
+      statusEmitter?.('status:llamacpp-setup', {
+        phase: 'downloading',
+        text: `Downloading llama.cpp update (${latestTag})…`,
+        progress: 0,
+        newVersion: latestTag
+      })
+
+      await downloadAndExtractLlamaVersion(latestTag, variant, (text, progress, downloaded, total) => {
+        statusEmitter?.('status:llamacpp-setup', {
+          phase: 'downloading',
+          text,
+          progress: progress != null ? Math.round(progress) : null,
+          downloaded,
+          total,
+          newVersion: latestTag
+        })
+      })
+
+      log.info(`Background update to ${latestTag} complete!`)
+      statusEmitter?.('status:llamacpp-setup', null)
+      statusEmitter?.('llamacpp:update-ready', { currentVersion: currentTag, newVersion: latestTag })
+    } catch (err) {
+      log.warn('Background update check failed:', err)
+      statusEmitter?.('status:llamacpp-setup', null)
+    } finally {
+      isCheckingUpdate = false
+    }
+  }, 4000)
+}
+
 export const setupLlamaCpp = async (
   onStatus?: (status: string) => void
 ): Promise<string> => {
@@ -318,6 +455,8 @@ export const setupLlamaCpp = async (
         .filter((d) => d.isDirectory())
         .map((d) => d.name)
 
+      // Sort newest version first
+      cachedVersions.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }))
       for (const cachedTag of cachedVersions) {
         const tagDir = path.join(cacheBase, cachedTag)
         if (isMatchingVariant(tagDir)) {
@@ -325,7 +464,9 @@ export const setupLlamaCpp = async (
           if (cachedBinary) {
             log.info(`Found cached llama-server binary (${cachedTag}, ${variant}): ${cachedBinary}`)
             binaryPath = cachedBinary
-            break
+            onStatus?.('Ready')
+            triggerBackgroundUpdateCheck(cachedTag, variant)
+            return cachedBinary
           }
         }
       }

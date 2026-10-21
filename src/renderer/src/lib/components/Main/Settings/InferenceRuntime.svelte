@@ -279,7 +279,22 @@
     </div>
 
     {#if setupStatus}
-      <div class="text-[11px] opacity-30 mb-3 font-mono truncate">{setupStatus}</div>
+      {@const match = typeof setupStatus === 'string' ? setupStatus.match(/(\d+)%/) : null}
+      {@const pct = typeof setupStatus === 'object' ? setupStatus.progress : (match ? parseInt(match[1], 10) : null)}
+      {@const label = typeof setupStatus === 'object' ? setupStatus.text : setupStatus}
+      <div class="mb-3 p-3 bg-black/[0.03] dark:bg-white/[0.04] rounded-2xl border border-black/5 dark:border-white/5 space-y-2">
+        <div class="flex items-center justify-between text-[11px] opacity-70">
+          <span class="font-medium truncate">{label}</span>
+          {#if pct != null}
+            <span class="font-mono">{pct}%</span>
+          {/if}
+        </div>
+        {#if pct != null}
+          <div class="w-full bg-black/10 dark:bg-white/10 rounded-full h-1.5 overflow-hidden">
+            <div class="bg-emerald-500 h-full transition-all duration-200" style="width: {pct}%"></div>
+          </div>
+        {/if}
+      </div>
     {/if}
 
     <div class="flex items-center gap-2">

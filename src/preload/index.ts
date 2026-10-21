@@ -146,6 +146,7 @@ const api = {
   },
   checkLlamaCppUpdate: () => ipcRenderer.invoke('llamacpp:check-update'),
   updateLlamaCpp: () => ipcRenderer.invoke('llamacpp:update'),
+  restartLlamaCpp: () => ipcRenderer.invoke('llamacpp:restart'),
   uninstallLlamaCpp: () => ipcRenderer.invoke('llamacpp:uninstall'),
 
   // Hugging Face models

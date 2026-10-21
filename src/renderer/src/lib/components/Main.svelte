@@ -12,6 +12,10 @@
   let sidebarOpen = $state(true)
   let activeConnectionName = $state('')
 
+  let downloadProgressInfo = $state<{ text: string; progress?: number | null } | null>(null)
+  let updateReadyInfo = $state<{ currentVersion: string; newVersion: string } | null>(null)
+  let restartingEngine = $state(false)
+
   onMount(async () => {
     connections.set(await window.electronAPI.getConnections())
     const cfg = await window.electronAPI.getConfig()
@@ -20,6 +24,32 @@
     setTimeout(() => {
       visible = true
     }, 50)
+
+    window.electronAPI.onData((data: any) => {
+      if (data.type === 'status:llamacpp-setup') {
+        if (!data.data) {
+          downloadProgressInfo = null
+        } else if (typeof data.data === 'string') {
+          const match = data.data.match(/(\d+)%/)
+          const progress = match ? parseInt(match[1], 10) : null
+          downloadProgressInfo = { text: data.data, progress }
+        } else {
+          downloadProgressInfo = {
+            text: data.data.text || 'Downloading llama.cpp…',
+            progress: data.data.progress != null ? data.data.progress : null
+          }
+        }
+      }
+      if (data.type === 'status:llamacpp' && (data.data === 'started' || data.data === 'ready')) {
+        if (downloadProgressInfo && !downloadProgressInfo.text.includes('update')) {
+          downloadProgressInfo = null
+        }
+      }
+      if (data.type === 'llamacpp:update-ready') {
+        downloadProgressInfo = null
+        updateReadyInfo = data.data
+      }
+    })
   })
 
   const toggleSidebar = () => {
@@ -109,6 +139,64 @@
         {/if}
       </div>
     </div>
+
+    <!-- Background Download Progress Banner -->
+    {#if downloadProgressInfo}
+      <div
+        class="shrink-0 px-4 py-1.5 bg-black/[0.04] dark:bg-white/[0.06] backdrop-blur border-b border-black/5 dark:border-white/5 flex items-center justify-between gap-3 text-[12px] z-40 select-none"
+        in:fade={{ duration: 150 }}
+      >
+        <div class="flex items-center gap-2 min-w-0">
+          <div class="w-2.5 h-2.5 rounded-full border-[1.5px] border-emerald-500 border-t-transparent animate-spin shrink-0"></div>
+          <span class="truncate font-medium opacity-80">{downloadProgressInfo.text}</span>
+        </div>
+        {#if downloadProgressInfo.progress != null}
+          <div class="flex items-center gap-2.5 shrink-0">
+            <div class="w-32 bg-black/10 dark:bg-white/10 rounded-full h-1.5 overflow-hidden">
+              <div
+                class="bg-emerald-500 h-full transition-all duration-200"
+                style="width: {downloadProgressInfo.progress}%"
+              ></div>
+            </div>
+            <span class="text-[11px] font-mono opacity-60 w-8 text-right">{downloadProgressInfo.progress}%</span>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Update Ready Notification Banner -->
+    {#if updateReadyInfo}
+      <div
+        class="shrink-0 px-4 py-2 bg-emerald-500/10 dark:bg-emerald-500/15 border-b border-emerald-500/20 flex items-center justify-between gap-3 text-[12px] z-40 select-none"
+        in:fade={{ duration: 200 }}
+      >
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="text-emerald-600 dark:text-emerald-400 font-medium">
+            ⚡ llama.cpp update ({updateReadyInfo.newVersion}) is ready!
+          </span>
+          <span class="opacity-60 text-[11px] hidden sm:inline">Engine is currently active on {updateReadyInfo.currentVersion}.</span>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <button
+            class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-medium transition cursor-pointer"
+            onclick={async () => {
+              restartingEngine = true
+              await window.electronAPI.restartLlamaCpp()
+              restartingEngine = false
+              updateReadyInfo = null
+            }}
+          >
+            {restartingEngine ? 'Restarting…' : 'Restart Engine'}
+          </button>
+          <button
+            class="px-2.5 py-1 opacity-50 hover:opacity-100 text-[11px] transition cursor-pointer"
+            onclick={() => (updateReadyInfo = null)}
+          >
+            Later
+          </button>
+        </div>
+      </div>
+    {/if}
 
     <!-- Content area below top bar -->
     <div class="flex-1 min-h-0">

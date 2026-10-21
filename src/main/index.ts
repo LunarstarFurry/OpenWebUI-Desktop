@@ -69,7 +69,8 @@ import {
   validateLlamaCppProcess,
   checkLlamaCppUpdate,
   updateLlamaCpp,
-  uninstallLlamaCpp
+  uninstallLlamaCpp,
+  setLlamaCppStatusEmitter
 } from './utils/llamacpp'
 
 import {
@@ -2130,6 +2131,32 @@ if (!gotTheLock) {
       }
     })
 
+    ipcMain.handle('llamacpp:restart', async () => {
+      try {
+        sendToRenderer('status:llamacpp', 'starting')
+        await stopLlamaCpp()
+        const result = await startLlamaCpp((status) => {
+          sendToRenderer('status:llamacpp-setup', status)
+        })
+        sendToRenderer('status:llamacpp', 'started')
+        sendToRenderer('llamacpp:ready', result)
+        if (result?.url) {
+          sendToRenderer('connections:openai', {
+            action: 'add',
+            name: 'Local Llama.cpp',
+            url: `${result.url}/v1`,
+            apiKey: 'sk-no-key-required'
+          })
+          setTimeout(() => sendToRenderer('models:refresh'), 1000)
+        }
+        return true
+      } catch (error) {
+        log.error('Failed to restart llamacpp:', error)
+        sendToRenderer('status:llamacpp', 'failed')
+        return false
+      }
+    })
+
     // ─── Startup ──────────────────────────────────────
 
     // Create tray
@@ -2157,40 +2184,9 @@ if (!gotTheLock) {
     validateOpenTerminalProcess()
     validateLlamaCppProcess()
 
-    // Auto-start Open Terminal if previously enabled
-    if (CONFIG?.openTerminal?.enabled) {
-      try {
-        sendToRenderer('status:open-terminal', 'starting')
-        const result = await startOpenTerminal(CONFIG?.openTerminal?.port ?? null, (status) => {
-          sendToRenderer('status:open-terminal-setup', status)
-        })
-        sendToRenderer('status:open-terminal', 'started')
-        sendToRenderer('open-terminal:ready', result)
-      } catch (error) {
-        log.error('Auto-start Open Terminal failed:', error)
-        sendToRenderer('status:open-terminal', 'failed')
-      }
-    }
-
-    // Auto-start llama.cpp if previously enabled
-    if (CONFIG?.llamaCpp?.enabled) {
-      try {
-        sendToRenderer('status:llamacpp', 'starting')
-        const result = await startLlamaCpp((status) => {
-          sendToRenderer('status:llamacpp-setup', status)
-        })
-        sendToRenderer('status:llamacpp', 'started')
-        sendToRenderer('llamacpp:ready', result)
-      } catch (error) {
-        log.error('Auto-start llama.cpp failed:', error)
-        sendToRenderer('status:llamacpp', 'failed')
-      }
-    }
-
     // Migrate legacy local connection entries out of the connections array
     if (CONFIG.connections.some((c) => c.type === 'local')) {
       CONFIG.connections = CONFIG.connections.filter((c) => c.type !== 'local')
-      // Preserve 'local' as default if it was the default
       if (!CONFIG.defaultConnectionId || CONFIG.defaultConnectionId === 'local') {
         CONFIG.defaultConnectionId = 'local'
       }
@@ -2198,19 +2194,59 @@ if (!gotTheLock) {
       log.info('Migrated legacy local connection entry from connections array')
     }
 
-    // Check if already configured, auto-connect to default
+    // 1. Create and show main window IMMEDIATELY on boot
     const defaultConn = await getDefaultConnection()
-    if (defaultConn) {
-      createMainWindow()
-      const result = await connectTo(defaultConn)
-      if (result) sendToRenderer('connection:open', result)
-    } else {
-      createMainWindow()
-    }
+    createMainWindow()
 
-    // Initialize auto-updater
     if (mainWindow) {
       initUpdater(mainWindow)
+    }
+
+    if (defaultConn) {
+      connectTo(defaultConn).then((result) => {
+        if (result) sendToRenderer('connection:open', result)
+      }).catch((e) => log.warn('Failed connecting to default:', e))
+    }
+
+    // 2. Auto-start Open Terminal in background
+    if (CONFIG?.openTerminal?.enabled) {
+      sendToRenderer('status:open-terminal', 'starting')
+      startOpenTerminal(CONFIG?.openTerminal?.port ?? null, (status) => {
+        sendToRenderer('status:open-terminal-setup', status)
+      })
+        .then((result) => {
+          sendToRenderer('status:open-terminal', 'started')
+          sendToRenderer('open-terminal:ready', result)
+        })
+        .catch((error) => {
+          log.error('Auto-start Open Terminal failed:', error)
+          sendToRenderer('status:open-terminal', 'failed')
+        })
+    }
+
+    // 3. Auto-start llama.cpp in background without blocking window
+    if (CONFIG?.llamaCpp?.enabled) {
+      sendToRenderer('status:llamacpp', 'starting')
+      startLlamaCpp((status) => {
+        sendToRenderer('status:llamacpp-setup', status)
+      })
+        .then((result) => {
+          sendToRenderer('status:llamacpp', 'started')
+          sendToRenderer('llamacpp:ready', result)
+          if (result?.url) {
+            sendToRenderer('connections:openai', {
+              action: 'add',
+              name: 'Local Llama.cpp',
+              url: `${result.url}/v1`,
+              apiKey: 'sk-no-key-required'
+            })
+            setTimeout(() => sendToRenderer('models:refresh'), 1000)
+          }
+        })
+        .catch((error) => {
+          log.error('Auto-start llama.cpp failed:', error)
+          sendToRenderer('status:llamacpp', 'failed')
+        })
     }
 
     app.on('activate', () => {
